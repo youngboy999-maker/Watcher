@@ -2,67 +2,100 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>사무실 출입 관리 대시보드</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f9; }
     .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .stats { display: flex; gap: 40px; flex-wrap: wrap; }
+    .stat-value { font-size: 36px; font-weight: bold; color: #2b56f5; margin: 0; }
     .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
     .photo-card { border: 1px solid #ddd; padding: 5px; border-radius: 6px; background: #fff; }
-    .photo-card img { width: 100%; height: 110px; object-fit: cover; border-radius: 4px; }
+    .photo-card img { width: 100%; height: 110px; object-fit: cover; border-radius: 4px; cursor: pointer; }
     .time-label { font-size: 11px; color: #666; margin-top: 4px; text-align: center; }
+    #status { font-size: 13px; color: #666; }
+    #status.error { color: #c62828; font-weight: bold; }
+    .empty { color: #888; }
   </style>
-
-  <!-- Supabase JS Client -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
   <h1>🏢 사무실 출입 관리 대시보드</h1>
-  
-  <div class="card">
-    <h3>오늘의 총 출입 기록</h3>
-    <p id="total-count" style="font-size: 36px; font-weight: bold; color: #2b56f5;">0회</p>
+  <p id="status">불러오는 중...</p>
+
+  <div class="card stats">
+    <div>
+      <h3>오늘의 출입 기록</h3>
+      <p id="today-count" class="stat-value">0회</p>
+    </div>
+    <div>
+      <h3>전체 기록</h3>
+      <p id="total-count" class="stat-value">0회</p>
+    </div>
   </div>
 
   <div class="card">
-    <h3>실시간 사진 및 감지 로그</h3>
+    <h3>실시간 사진 및 감지 로그 (최근 100건)</h3>
     <div id="gallery" class="photo-grid"></div>
   </div>
 
   <script>
-    const SUPABASE_URL = "https://YOUR_PROJECT_ID.supabase.co";
-    const SUPABASE_KEY = "YOUR_SUPABASE_ANON_KEY";
+    const SUPABASE_URL = "https://pwddlcjqluhswgiltysp.supabase.co";
+    const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3ZGRsY2pxbHVoc3dnaWx0eXNwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MTA0OTYsImV4cCI6MjEwNjQ4NjQ5Nn0.Z-ZvhvfhKa7TZ2NQGHDKDRzQJ_KU72_MEgjEb_OX3Y4";
     const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    const statusEl = document.getElementById('status');
+
+    function setStatus(msg, isError) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? 'error' : '';
+    }
 
     async function loadLogs() {
-      const { data, error } = await _supabase
-        .from('visitor_logs')
-        .select('*')
-        .order('created_at', { ascending: false });
+      const startOfToday = new Date();
+      startOfToday.setHours(0, 0, 0, 0);
 
+      const [list, today] = await Promise.all([
+        _supabase.from('visitor_logs').select('*', { count: 'exact' })
+          .order('created_at', { ascending: false }).limit(100),
+        _supabase.from('visitor_logs').select('id', { count: 'exact', head: true })
+          .gte('created_at', startOfToday.toISOString())
+      ]);
+
+      const error = list.error || today.error;
       if (error) {
         console.error(error);
+        setStatus('DB 오류: ' + error.message, true);
         return;
       }
 
-      const gallery = document.getElementById('gallery');
-      document.getElementById('total-count').innerText = data.length + '회';
-      gallery.innerHTML = '';
+      document.getElementById('total-count').innerText = (list.count ?? 0) + '회';
+      document.getElementById('today-count').innerText = (today.count ?? 0) + '회';
+      setStatus('마지막 갱신: ' + new Date().toLocaleTimeString('ko-KR') + ' (5초마다 자동 갱신)');
 
-      data.forEach(item => {
-        const date = new Date(item.created_at).toLocaleString('ko-KR');
+      const gallery = document.getElementById('gallery');
+      gallery.innerHTML = '';
+      if (list.data.length === 0) {
+        gallery.innerHTML = '<p class="empty">아직 기록이 없습니다. ESP32-CAM 시리얼 모니터에서 업로드 로그를 확인하세요.</p>';
+        return;
+      }
+
+      list.data.forEach(item => {
         const card = document.createElement('div');
         card.className = 'photo-card';
-        card.innerHTML = `
-          <img src="${item.image_url}" alt="방문 사진">
-          <div class="time-label">${date}</div>
-        `;
+        const img = document.createElement('img');
+        img.src = item.image_url;
+        img.alt = '방문 사진';
+        img.onclick = () => window.open(item.image_url, '_blank');
+        const label = document.createElement('div');
+        label.className = 'time-label';
+        label.textContent = new Date(item.created_at).toLocaleString('ko-KR');
+        card.append(img, label);
         gallery.appendChild(card);
       });
     }
 
-    // 5초마다 데이터 최신화
-    loadLogs();
-    setInterval(loadLogs, 5000);
+    loadLogs().catch(e => setStatus('불러오기 실패: ' + e.message, true));
+    setInterval(() => loadLogs().catch(e => setStatus('불러오기 실패: ' + e.message, true)), 5000);
   </script>
 </body>
 </html>
