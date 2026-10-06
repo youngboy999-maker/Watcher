@@ -5,97 +5,435 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>사무실 출입 관리 대시보드</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f9; }
+    body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f6f9; color: #222; }
     .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    .header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
     .stats { display: flex; gap: 40px; flex-wrap: wrap; }
     .stat-value { font-size: 36px; font-weight: bold; color: #2b56f5; margin: 0; }
-    .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
-    .photo-card { border: 1px solid #ddd; padding: 5px; border-radius: 6px; background: #fff; }
-    .photo-card img { width: 100%; height: 110px; object-fit: cover; border-radius: 4px; cursor: pointer; }
-    .time-label { font-size: 11px; color: #666; margin-top: 4px; text-align: center; }
+    .hidden { display: none !important; }
+    button { padding: 6px 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+    button.primary { background: #2b56f5; color: #fff; border-color: #2b56f5; }
+    input, select { padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
     #status { font-size: 13px; color: #666; }
     #status.error { color: #c62828; font-weight: bold; }
     .empty { color: #888; }
+
+    #login-box { max-width: 320px; margin: 60px auto; display: flex; flex-direction: column; gap: 10px; }
+    #login-error { color: #c62828; font-size: 13px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 14px; }
+    th { color: #666; font-weight: normal; font-size: 12px; }
+    td.num { font-weight: bold; color: #2b56f5; }
+    .thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 50%; background: #eee; }
+    .person-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+    .table-wrap { overflow-x: auto; }
+
+    .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
+    .photo-card { border: 1px solid #ddd; padding: 5px; border-radius: 6px; background: #fff; }
+    .photo-card img { width: 100%; height: 120px; object-fit: cover; border-radius: 4px; cursor: pointer; background: #eee; }
+    .time-label { font-size: 11px; color: #666; margin-top: 4px; text-align: center; }
+    .names { font-size: 12px; text-align: center; font-weight: bold; }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
 </head>
 <body>
-  <h1>🏢 사무실 출입 관리 대시보드</h1>
-  <p id="status">불러오는 중...</p>
-
-  <div class="card stats">
-    <div>
-      <h3>오늘의 출입 기록</h3>
-      <p id="today-count" class="stat-value">0회</p>
-    </div>
-    <div>
-      <h3>전체 기록</h3>
-      <p id="total-count" class="stat-value">0회</p>
+  <!-- 로그인 화면 -->
+  <div id="login-view" class="hidden">
+    <div id="login-box" class="card">
+      <h2>🏢 출입 관리 로그인</h2>
+      <input id="login-email" type="email" placeholder="이메일" autocomplete="username">
+      <input id="login-password" type="password" placeholder="비밀번호" autocomplete="current-password">
+      <button class="primary" id="login-btn">로그인</button>
+      <div id="login-error"></div>
     </div>
   </div>
 
-  <div class="card">
-    <h3>실시간 사진 및 감지 로그 (최근 100건)</h3>
-    <div id="gallery" class="photo-grid"></div>
+  <!-- 대시보드 -->
+  <div id="app-view" class="hidden">
+    <div class="header">
+      <h1>🏢 사무실 출입 관리 대시보드</h1>
+      <button id="logout-btn">로그아웃</button>
+    </div>
+    <p id="status">준비 중...</p>
+
+    <div class="card stats">
+      <div>
+        <h3>오늘 방문 인원</h3>
+        <p id="today-people" class="stat-value">0명</p>
+      </div>
+      <div>
+        <h3>오늘 방문 횟수</h3>
+        <p id="today-visits" class="stat-value">0회</p>
+      </div>
+      <div>
+        <h3>분석 대기 사진</h3>
+        <p id="queue-count" class="stat-value">0장</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>인물별 방문 기록</h3>
+      <p class="empty" style="font-size:13px">처음 보는 얼굴은 "미확인 N"으로 자동 등록됩니다. 이름을 바꾸고, 같은 사람이 여러 명으로 나뉘었으면 "합치기"로 묶어주세요.
+        방문은 <span id="gap-label"></span>분 이상 간격을 두고 다시 찍혔을 때 1회로 셉니다.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th>이름</th><th>오늘</th><th>전체</th><th>마지막 방문</th><th></th></tr></thead>
+          <tbody id="people-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>최근 얼굴 인식 사진</h3>
+      <div id="gallery" class="photo-grid"></div>
+    </div>
   </div>
 
   <script>
     const SUPABASE_URL = "https://pwddlcjqluhswgiltysp.supabase.co";
     const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3ZGRsY2pxbHVoc3dnaWx0eXNwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA5MTA0OTYsImV4cCI6MjEwNjQ4NjQ5Nn0.Z-ZvhvfhKa7TZ2NQGHDKDRzQJ_KU72_MEgjEb_OX3Y4";
+    const BUCKET = "photos";
+    const MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/";
+
+    // ===== 인식 설정 =====
+    const MATCH_THRESHOLD = 0.5;      // 얼굴 특징값 거리. 이보다 가까우면 같은 사람 (낮출수록 엄격)
+    const MIN_FACE_PX = 40;           // 이보다 작은 얼굴은 인식 정확도가 낮아 무시
+    const MIN_DETECT_SCORE = 0.5;     // 얼굴 검출 신뢰도
+    const VISIT_GAP_MIN = 30;         // 같은 사람이 이 시간(분) 안에 다시 찍히면 같은 방문으로 간주
+    const DELETE_NO_FACE = true;      // 얼굴 없는 사진은 저장소/DB에서 자동 삭제
+
     const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-    const statusEl = document.getElementById('status');
+    const $ = id => document.getElementById(id);
+    document.getElementById('gap-label').textContent = VISIT_GAP_MIN;
 
     function setStatus(msg, isError) {
-      statusEl.textContent = msg;
-      statusEl.className = isError ? 'error' : '';
+      $('status').textContent = msg;
+      $('status').className = isError ? 'error' : '';
     }
 
-    async function loadLogs() {
+    // image_url(공개 URL 형식)에서 버킷 내부 경로 추출
+    function storagePath(url) {
+      const marker = `/storage/v1/object/public/${BUCKET}/`;
+      const i = url.indexOf(marker);
+      return i >= 0 ? decodeURIComponent(url.slice(i + marker.length)) : null;
+    }
+
+    const signedCache = new Map();  // path -> {url, expires}
+    async function signedUrls(paths) {
+      const now = Date.now();
+      const missing = paths.filter(p => !(signedCache.get(p)?.expires > now));
+      if (missing.length) {
+        const { data, error } = await _supabase.storage.from(BUCKET).createSignedUrls(missing, 3600);
+        if (error) throw error;
+        data.forEach(d => { if (d.signedUrl) signedCache.set(d.path, { url: d.signedUrl, expires: now + 3000 * 1000 }); });
+      }
+      return paths.map(p => signedCache.get(p)?.url || '');
+    }
+
+    function distance(a, b) {
+      let s = 0;
+      for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) ** 2;
+      return Math.sqrt(s);
+    }
+
+    function cropThumb(img, box) {
+      const pad = box.width * 0.25;
+      const sx = Math.max(0, box.x - pad), sy = Math.max(0, box.y - pad);
+      const sw = Math.min(img.width - sx, box.width + pad * 2), sh = Math.min(img.height - sy, box.height + pad * 2);
+      const c = document.createElement('canvas');
+      c.width = c.height = 96;
+      c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, 96, 96);
+      return c.toDataURL('image/jpeg', 0.8);
+    }
+
+    // ===== 얼굴 분석 =====
+    let modelsReady = false;
+    let analyzing = false;
+
+    async function loadModels() {
+      setStatus('얼굴 인식 모델 불러오는 중...');
+      await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+      modelsReady = true;
+    }
+
+    async function analyzeLog(log, people) {
+      // 다른 브라우저가 동시에 분석하지 않도록 먼저 선점
+      const { data: claimed } = await _supabase.from('visitor_logs')
+        .update({ face_status: 'processing' }).eq('id', log.id).is('face_status', null).select('id');
+      if (!claimed || claimed.length === 0) return;
+
+      const path = storagePath(log.image_url);
+      try {
+        const [url] = await signedUrls([path]);
+        const img = await faceapi.fetchImage(url);
+        const dets = (await faceapi
+          .detectAllFaces(img, new faceapi.SsdMobilenetv1Options({ minConfidence: MIN_DETECT_SCORE }))
+          .withFaceLandmarks().withFaceDescriptors())
+          .filter(d => d.detection.box.width >= MIN_FACE_PX);
+
+        if (dets.length === 0) {
+          if (DELETE_NO_FACE) {
+            await _supabase.storage.from(BUCKET).remove([path]);
+            await _supabase.from('visitor_logs').delete().eq('id', log.id);
+          } else {
+            await _supabase.from('visitor_logs').update({ face_status: 'no_face' }).eq('id', log.id);
+          }
+          return;
+        }
+
+        for (const d of dets) {
+          const desc = Array.from(d.descriptor);
+          let best = null, bestDist = Infinity;
+          for (const p of people) {
+            const dist = distance(desc, p.descriptor);
+            if (dist < bestDist) { best = p; bestDist = dist; }
+          }
+
+          let personId;
+          if (best && bestDist < MATCH_THRESHOLD) {
+            // 기존 인물: 평균 특징값 갱신
+            const n = best.sample_count;
+            best.descriptor = best.descriptor.map((v, i) => (v * n + desc[i]) / (n + 1));
+            best.sample_count = n + 1;
+            await _supabase.from('people')
+              .update({ descriptor: best.descriptor, sample_count: best.sample_count }).eq('id', best.id);
+            personId = best.id;
+          } else {
+            // 처음 보는 얼굴: 미확인 인물로 자동 등록
+            const name = `미확인 ${Math.max(0, ...people.map(p => p.id)) + 1}`;
+            const { data, error } = await _supabase.from('people')
+              .insert({ name, descriptor: desc, sample_count: 1, thumb: cropThumb(img, d.detection.box) })
+              .select().single();
+            if (error) throw error;
+            people.push(data);
+            personId = data.id;
+            bestDist = null;
+          }
+
+          const { error: fErr } = await _supabase.from('faces').insert({
+            log_id: log.id, person_id: personId, descriptor: desc,
+            distance: bestDist, seen_at: log.created_at
+          });
+          if (fErr) throw fErr;
+        }
+        await _supabase.from('visitor_logs').update({ face_status: 'done' }).eq('id', log.id);
+      } catch (e) {
+        console.error('analyze failed', log.id, e);
+        await _supabase.from('visitor_logs').update({ face_status: 'error' }).eq('id', log.id);
+      }
+    }
+
+    async function analyzePending() {
+      if (!modelsReady || analyzing) return;
+      analyzing = true;
+      try {
+        const { data: pending, error } = await _supabase.from('visitor_logs')
+          .select('id, created_at, image_url')
+          .is('face_status', null).like('image_url', '%/storage/v1/object/%')
+          .order('created_at', { ascending: true }).limit(5);
+        if (error) throw error;
+        if (pending.length === 0) return;
+
+        const { data: people, error: pErr } = await _supabase.from('people').select('id, name, descriptor, sample_count');
+        if (pErr) throw pErr;
+        for (const log of pending) {
+          setStatus(`얼굴 분석 중... (${new Date(log.created_at).toLocaleTimeString('ko-KR')} 사진)`);
+          await analyzeLog(log, people);
+        }
+        await render();
+      } catch (e) {
+        console.error(e);
+        setStatus('분석 오류: ' + e.message, true);
+      } finally {
+        analyzing = false;
+      }
+    }
+
+    // ===== 화면 표시 =====
+    function countVisits(times) {
+      // times: 오름차순 Date 배열 -> VISIT_GAP_MIN 이상 벌어질 때마다 새 방문
+      const visits = [];
+      for (const t of times) {
+        if (visits.length === 0 || t - visits[visits.length - 1].last > VISIT_GAP_MIN * 60000) {
+          visits.push({ start: t, last: t });
+        } else {
+          visits[visits.length - 1].last = t;
+        }
+      }
+      return visits;
+    }
+
+    let lastGalleryKey = '';
+
+    async function render() {
       const startOfToday = new Date();
       startOfToday.setHours(0, 0, 0, 0);
 
-      const [list, today] = await Promise.all([
-        _supabase.from('visitor_logs').select('*', { count: 'exact' })
-          .order('created_at', { ascending: false }).limit(100),
+      const [peopleRes, facesRes, queueRes, galleryRes] = await Promise.all([
+        _supabase.from('people').select('id, name, thumb').order('id'),
+        _supabase.from('faces').select('person_id, seen_at').order('seen_at').limit(20000),
         _supabase.from('visitor_logs').select('id', { count: 'exact', head: true })
-          .gte('created_at', startOfToday.toISOString())
+          .is('face_status', null).like('image_url', '%/storage/v1/object/%'),
+        _supabase.from('visitor_logs').select('id, created_at, image_url, faces(person_id)')
+          .eq('face_status', 'done').order('created_at', { ascending: false }).limit(40)
       ]);
+      const err = peopleRes.error || facesRes.error || queueRes.error || galleryRes.error;
+      if (err) { setStatus('DB 오류: ' + err.message, true); return; }
 
-      const error = list.error || today.error;
-      if (error) {
-        console.error(error);
-        setStatus('DB 오류: ' + error.message, true);
-        return;
+      const people = peopleRes.data;
+      const nameOf = Object.fromEntries(people.map(p => [p.id, p.name]));
+
+      // 인물별 방문 집계
+      const timesByPerson = {};
+      facesRes.data.forEach(f => (timesByPerson[f.person_id] ||= []).push(new Date(f.seen_at)));
+      const rows = people.map(p => {
+        const visits = countVisits(timesByPerson[p.id] || []);
+        const today = visits.filter(v => v.last >= startOfToday).length;
+        const last = visits.length ? visits[visits.length - 1].last : null;
+        return { ...p, total: visits.length, today, last };
+      }).sort((a, b) => (b.last || 0) - (a.last || 0));
+
+      $('today-people').textContent = rows.filter(r => r.today > 0).length + '명';
+      $('today-visits').textContent = rows.reduce((s, r) => s + r.today, 0) + '회';
+      $('queue-count').textContent = (queueRes.count ?? 0) + '장';
+
+      const tbody = $('people-body');
+      tbody.innerHTML = '';
+      if (rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">아직 인식된 얼굴이 없습니다.</td></tr>';
       }
-
-      document.getElementById('total-count').innerText = (list.count ?? 0) + '회';
-      document.getElementById('today-count').innerText = (today.count ?? 0) + '회';
-      setStatus('마지막 갱신: ' + new Date().toLocaleTimeString('ko-KR') + ' (5초마다 자동 갱신)');
-
-      const gallery = document.getElementById('gallery');
-      gallery.innerHTML = '';
-      if (list.data.length === 0) {
-        gallery.innerHTML = '<p class="empty">아직 기록이 없습니다. ESP32-CAM 시리얼 모니터에서 업로드 로그를 확인하세요.</p>';
-        return;
-      }
-
-      list.data.forEach(item => {
-        const card = document.createElement('div');
-        card.className = 'photo-card';
-        const img = document.createElement('img');
-        img.src = item.image_url;
-        img.alt = '방문 사진';
-        img.onclick = () => window.open(item.image_url, '_blank');
-        const label = document.createElement('div');
-        label.className = 'time-label';
-        label.textContent = new Date(item.created_at).toLocaleString('ko-KR');
-        card.append(img, label);
-        gallery.appendChild(card);
+      rows.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><img class="thumb" alt=""></td>
+          <td class="name"></td>
+          <td class="num">${r.today}회</td>
+          <td>${r.total}회</td>
+          <td>${r.last ? r.last.toLocaleString('ko-KR') : '-'}</td>
+          <td><div class="person-actions">
+            <button data-act="rename">이름 변경</button>
+            <select data-act="merge"><option value="">합치기...</option></select>
+            <button data-act="delete">삭제</button>
+          </div></td>`;
+        if (r.thumb) tr.querySelector('.thumb').src = r.thumb;
+        tr.querySelector('.name').textContent = r.name;
+        const sel = tr.querySelector('select');
+        people.filter(p => p.id !== r.id).forEach(p => {
+          const o = document.createElement('option');
+          o.value = p.id;
+          o.textContent = `→ ${p.name}(으)로`;
+          sel.appendChild(o);
+        });
+        tr.querySelector('[data-act=rename]').onclick = () => renamePerson(r);
+        tr.querySelector('[data-act=delete]').onclick = () => deletePerson(r);
+        sel.onchange = () => sel.value && mergePerson(r, Number(sel.value), nameOf[sel.value]);
+        tbody.appendChild(tr);
       });
+
+      // 최근 사진 (바뀌었을 때만 다시 그림)
+      const logs = galleryRes.data;
+      const galleryKey = logs.map(l => l.id + ':' + l.faces.map(f => nameOf[f.person_id]).join(',')).join('|');
+      if (galleryKey !== lastGalleryKey) {
+        lastGalleryKey = galleryKey;
+        const gallery = $('gallery');
+        gallery.innerHTML = '';
+        if (logs.length === 0) {
+          gallery.innerHTML = '<p class="empty">아직 얼굴이 인식된 사진이 없습니다.</p>';
+        } else {
+          const urls = await signedUrls(logs.map(l => storagePath(l.image_url)));
+          logs.forEach((l, i) => {
+            const card = document.createElement('div');
+            card.className = 'photo-card';
+            const img = document.createElement('img');
+            img.src = urls[i];
+            img.alt = '방문 사진';
+            img.onclick = () => window.open(urls[i], '_blank');
+            const names = document.createElement('div');
+            names.className = 'names';
+            names.textContent = [...new Set(l.faces.map(f => nameOf[f.person_id] || '?'))].join(', ');
+            const label = document.createElement('div');
+            label.className = 'time-label';
+            label.textContent = new Date(l.created_at).toLocaleString('ko-KR');
+            card.append(img, names, label);
+            gallery.appendChild(card);
+          });
+        }
+      }
+
+      if (!analyzing) setStatus('마지막 갱신: ' + new Date().toLocaleTimeString('ko-KR') + ' (이 페이지가 열려 있는 동안 새 사진을 자동 분석합니다)');
     }
 
-    loadLogs().catch(e => setStatus('불러오기 실패: ' + e.message, true));
-    setInterval(() => loadLogs().catch(e => setStatus('불러오기 실패: ' + e.message, true)), 5000);
+    async function renamePerson(p) {
+      const name = prompt('새 이름', p.name);
+      if (!name || name === p.name) return;
+      const { error } = await _supabase.from('people').update({ name }).eq('id', p.id);
+      if (error) return alert(error.message);
+      render();
+    }
+
+    async function mergePerson(src, targetId, targetName) {
+      if (!confirm(`"${src.name}"의 기록을 모두 "${targetName}"(으)로 합칠까요?`)) return render();
+      const { error } = await _supabase.from('faces').update({ person_id: targetId }).eq('person_id', src.id);
+      if (error) return alert(error.message);
+
+      // 합친 인물의 평균 특징값 다시 계산
+      const { data: descs } = await _supabase.from('faces').select('descriptor').eq('person_id', targetId);
+      if (descs && descs.length) {
+        const mean = descs[0].descriptor.map((_, i) => descs.reduce((s, d) => s + d.descriptor[i], 0) / descs.length);
+        await _supabase.from('people').update({ descriptor: mean, sample_count: descs.length }).eq('id', targetId);
+      }
+      await _supabase.from('people').delete().eq('id', src.id);
+      render();
+    }
+
+    async function deletePerson(p) {
+      if (!confirm(`"${p.name}"과(와) 방문 기록을 삭제할까요? (사진은 남습니다)`)) return;
+      const { error } = await _supabase.from('people').delete().eq('id', p.id);
+      if (error) return alert(error.message);
+      render();
+    }
+
+    // ===== 로그인 =====
+    let timers = [];
+
+    async function startApp() {
+      $('login-view').classList.add('hidden');
+      $('app-view').classList.remove('hidden');
+      try {
+        await render();
+        await loadModels();
+        await analyzePending();
+      } catch (e) {
+        setStatus('초기화 실패: ' + e.message, true);
+      }
+      timers.push(setInterval(() => render().catch(e => setStatus('불러오기 실패: ' + e.message, true)), 10000));
+      timers.push(setInterval(analyzePending, 5000));
+    }
+
+    function showLogin() {
+      timers.forEach(clearInterval);
+      timers = [];
+      $('app-view').classList.add('hidden');
+      $('login-view').classList.remove('hidden');
+    }
+
+    $('login-btn').onclick = async () => {
+      $('login-error').textContent = '';
+      const { error } = await _supabase.auth.signInWithPassword({
+        email: $('login-email').value.trim(),
+        password: $('login-password').value
+      });
+      if (error) $('login-error').textContent = '로그인 실패: ' + error.message;
+      else startApp();
+    };
+    $('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') $('login-btn').click(); });
+    $('logout-btn').onclick = async () => { await _supabase.auth.signOut(); showLogin(); };
+
+    _supabase.auth.getSession().then(({ data }) => data.session ? startApp() : showLogin());
   </script>
 </body>
 </html>
