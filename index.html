@@ -28,6 +28,8 @@
     .thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 50%; background: #eee; }
     .person-actions { display: flex; gap: 4px; flex-wrap: wrap; }
     .table-wrap { overflow-x: auto; }
+    .register-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .badge { font-size: 11px; color: #2e7d32; border: 1px solid #2e7d32; border-radius: 10px; padding: 1px 6px; margin-left: 4px; }
 
     .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; }
     .photo-card { border: 1px solid #ddd; padding: 5px; border-radius: 6px; background: #fff; }
@@ -71,6 +73,28 @@
         <h3>분석 대기 사진</h3>
         <p id="queue-count" class="stat-value">0장</p>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>📹 실시간 보기</h3>
+      <p class="empty" style="font-size:13px">ESP32와 <b>같은 Wi-Fi</b>에 연결된 기기에서만 열립니다. 주소는 ESP32 시리얼 모니터의 "[LIVE] 실시간 보기" 줄에 나옵니다.</p>
+      <div class="register-row">
+        <input id="live-addr" placeholder="예) 192.168.0.23 또는 watcher.local">
+        <button class="primary" id="live-btn">실시간 보기 열기</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>얼굴 등록</h3>
+      <p class="empty" style="font-size:13px">정면 얼굴이 잘 보이는 사진을 1~3장 올리면, 이후 찍히는 사진에서 그 사람을 자동으로 알아봅니다. 휴대폰 사진도 됩니다.
+        이미 "미확인"으로 잡혀 있던 같은 사람은 자동으로 합쳐집니다.</p>
+      <div class="register-row">
+        <select id="reg-target"><option value="">+ 새 인물</option></select>
+        <input id="reg-name" placeholder="이름 (새 인물일 때)">
+        <input id="reg-files" type="file" accept="image/*" multiple>
+        <button class="primary" id="reg-btn">등록</button>
+      </div>
+      <p id="reg-result" style="font-size:13px"></p>
     </div>
 
     <div class="card">
@@ -138,6 +162,54 @@
       return Math.sqrt(s);
     }
 
+    // 등록 사진(ref_descriptors)과 평균 특징값 중 가장 가까운 거리
+    function personDistance(desc, p) {
+      const refs = p.ref_descriptors || [];
+      return Math.min(distance(desc, p.descriptor), ...refs.map(r => distance(desc, r)));
+    }
+
+    function meanOf(descs) {
+      return descs[0].map((_, i) => descs.reduce((s, d) => s + d[i], 0) / descs.length);
+    }
+
+    // 어두운 사진 밝기 자동 보정: 양 끝 1% 밝기를 잘라 대비를 늘리고,
+    // 평균 밝기가 중간보다 어두우면 감마로 밝게 (밝은 사진은 거의 그대로)
+    function enhance(img) {
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const im = ctx.getImageData(0, 0, c.width, c.height);
+      const d = im.data, n = d.length / 4;
+
+      const hist = new Uint32Array(256);
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const y = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+        hist[y]++; sum += y;
+      }
+      let lo = 0, hi = 255, acc = 0;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > n * 0.01) { lo = v; break; } }
+      acc = 0;
+      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > n * 0.01) { hi = v; break; } }
+      if (hi - lo < 20) return c;
+
+      const m = Math.min(0.95, Math.max(0.05, (sum / n - lo) / (hi - lo)));
+      const gamma = Math.min(1, Math.max(0.4, Math.log(0.5) / Math.log(m)));
+      const lut = new Uint8ClampedArray(256);
+      for (let v = 0; v < 256; v++) lut[v] = 255 * Math.min(1, Math.max(0, (v - lo) / (hi - lo))) ** gamma;
+      for (let i = 0; i < d.length; i += 4) { d[i] = lut[d[i]]; d[i + 1] = lut[d[i + 1]]; d[i + 2] = lut[d[i + 2]]; }
+      ctx.putImageData(im, 0, 0);
+      return c;
+    }
+
+    async function detectFaces(src) {
+      return (await faceapi
+        .detectAllFaces(src, new faceapi.SsdMobilenetv1Options({ minConfidence: MIN_DETECT_SCORE }))
+        .withFaceLandmarks().withFaceDescriptors())
+        .filter(d => d.detection.box.width >= MIN_FACE_PX);
+    }
+
     function cropThumb(img, box) {
       const pad = box.width * 0.25;
       const sx = Math.max(0, box.x - pad), sy = Math.max(0, box.y - pad);
@@ -169,11 +241,11 @@
       const path = storagePath(log.image_url);
       try {
         const [url] = await signedUrls([path]);
-        const img = await faceapi.fetchImage(url);
-        const dets = (await faceapi
-          .detectAllFaces(img, new faceapi.SsdMobilenetv1Options({ minConfidence: MIN_DETECT_SCORE }))
-          .withFaceLandmarks().withFaceDescriptors())
-          .filter(d => d.detection.box.width >= MIN_FACE_PX);
+        const raw = await faceapi.fetchImage(url);
+        // 밝기 보정한 사진으로 먼저 찾고, 없으면 원본으로 한 번 더
+        let img = enhance(raw);
+        let dets = await detectFaces(img);
+        if (dets.length === 0) { img = raw; dets = await detectFaces(raw); }
 
         if (dets.length === 0) {
           if (DELETE_NO_FACE) {
@@ -189,7 +261,7 @@
           const desc = Array.from(d.descriptor);
           let best = null, bestDist = Infinity;
           for (const p of people) {
-            const dist = distance(desc, p.descriptor);
+            const dist = personDistance(desc, p);
             if (dist < bestDist) { best = p; bestDist = dist; }
           }
 
@@ -238,7 +310,7 @@
         if (error) throw error;
         if (pending.length === 0) return;
 
-        const { data: people, error: pErr } = await _supabase.from('people').select('id, name, descriptor, sample_count');
+        const { data: people, error: pErr } = await _supabase.from('people').select('id, name, descriptor, sample_count, ref_descriptors');
         if (pErr) throw pErr;
         for (const log of pending) {
           setStatus(`얼굴 분석 중... (${new Date(log.created_at).toLocaleTimeString('ko-KR')} 사진)`);
@@ -274,7 +346,7 @@
       startOfToday.setHours(0, 0, 0, 0);
 
       const [peopleRes, facesRes, queueRes, galleryRes] = await Promise.all([
-        _supabase.from('people').select('id, name, thumb').order('id'),
+        _supabase.from('people').select('id, name, thumb, ref_descriptors').order('id'),
         _supabase.from('faces').select('person_id, seen_at').order('seen_at').limit(20000),
         _supabase.from('visitor_logs').select('id', { count: 'exact', head: true })
           .is('face_status', null).like('image_url', '%/storage/v1/object/%'),
@@ -321,6 +393,12 @@
           </div></td>`;
         if (r.thumb) tr.querySelector('.thumb').src = r.thumb;
         tr.querySelector('.name').textContent = r.name;
+        if ((r.ref_descriptors || []).length) {
+          const b = document.createElement('span');
+          b.className = 'badge';
+          b.textContent = `등록 ${r.ref_descriptors.length}장`;
+          tr.querySelector('.name').appendChild(b);
+        }
         const sel = tr.querySelector('select');
         people.filter(p => p.id !== r.id).forEach(p => {
           const o = document.createElement('option');
@@ -333,6 +411,18 @@
         sel.onchange = () => sel.value && mergePerson(r, Number(sel.value), nameOf[sel.value]);
         tbody.appendChild(tr);
       });
+
+      // 얼굴 등록 대상 목록 (선택 상태 유지)
+      const regSel = $('reg-target');
+      const keep = regSel.value;
+      regSel.innerHTML = '<option value="">+ 새 인물</option>';
+      people.forEach(p => {
+        const o = document.createElement('option');
+        o.value = p.id;
+        o.textContent = `${p.name}에 사진 추가`;
+        regSel.appendChild(o);
+      });
+      regSel.value = keep;
 
       // 최근 사진 (바뀌었을 때만 다시 그림)
       const logs = galleryRes.data;
@@ -375,19 +465,97 @@
       render();
     }
 
-    async function mergePerson(src, targetId, targetName) {
-      if (!confirm(`"${src.name}"의 기록을 모두 "${targetName}"(으)로 합칠까요?`)) return render();
+    async function mergePerson(src, targetId, targetName, silent = false) {
+      if (!silent && !confirm(`"${src.name}"의 기록을 모두 "${targetName}"(으)로 합칠까요?`)) return render();
       const { error } = await _supabase.from('faces').update({ person_id: targetId }).eq('person_id', src.id);
       if (error) return alert(error.message);
 
-      // 합친 인물의 평균 특징값 다시 계산
+      // 등록 사진 특징값 합치기 + 평균 특징값 다시 계산
+      const { data: both } = await _supabase.from('people').select('id, ref_descriptors').in('id', [src.id, targetId]);
+      const refs = (both || []).flatMap(p => p.ref_descriptors || []);
       const { data: descs } = await _supabase.from('faces').select('descriptor').eq('person_id', targetId);
+      const update = { ref_descriptors: refs };
       if (descs && descs.length) {
-        const mean = descs[0].descriptor.map((_, i) => descs.reduce((s, d) => s + d.descriptor[i], 0) / descs.length);
-        await _supabase.from('people').update({ descriptor: mean, sample_count: descs.length }).eq('id', targetId);
+        update.descriptor = meanOf(descs.map(d => d.descriptor));
+        update.sample_count = descs.length;
       }
+      await _supabase.from('people').update(update).eq('id', targetId);
       await _supabase.from('people').delete().eq('id', src.id);
-      render();
+      if (!silent) render();
+    }
+
+    async function registerPerson() {
+      if (!modelsReady) return alert('얼굴 인식 모델을 불러오는 중입니다. 잠시 후 다시 시도하세요.');
+      const files = [...$('reg-files').files];
+      const targetId = Number($('reg-target').value) || null;
+      const name = $('reg-name').value.trim();
+      if (!files.length) return alert('사진을 선택하세요.');
+      if (!targetId && !name) return alert('이름을 입력하세요.');
+
+      const result = $('reg-result');
+      result.textContent = '얼굴 분석 중...';
+      $('reg-btn').disabled = true;
+      try {
+        const refs = [], fails = [];
+        let thumb = null;
+        for (const f of files) {
+          const src = enhance(await faceapi.bufferToImage(f));
+          const dets = await detectFaces(src);
+          if (!dets.length) { fails.push(f.name); continue; }
+          // 여러 명이 찍혔으면 가장 큰 얼굴 사용
+          const d = dets.sort((a, b) => b.detection.box.area - a.detection.box.area)[0];
+          refs.push(Array.from(d.descriptor));
+          thumb ||= cropThumb(src, d.detection.box);
+        }
+        if (!refs.length) {
+          result.textContent = '등록 실패: 얼굴을 찾지 못했습니다 (' + fails.join(', ') + ')';
+          return;
+        }
+
+        let person;
+        if (targetId) {
+          const { data: p, error } = await _supabase.from('people').select('id, name, ref_descriptors').eq('id', targetId).single();
+          if (error) throw error;
+          const update = { ref_descriptors: [...(p.ref_descriptors || []), ...refs] };
+          if (!(p.ref_descriptors || []).length) update.thumb = thumb;  // 첫 등록이면 썸네일을 등록 사진으로
+          if (name) update.name = name;
+          const { data, error: uErr } = await _supabase.from('people').update(update).eq('id', targetId).select().single();
+          if (uErr) throw uErr;
+          person = data;
+        } else {
+          const { data, error } = await _supabase.from('people')
+            .insert({ name, descriptor: meanOf(refs), sample_count: refs.length, ref_descriptors: refs, thumb })
+            .select().single();
+          if (error) throw error;
+          person = data;
+        }
+
+        // 아직 등록 안 된 "미확인" 인물 중 같은 사람은 자동으로 합치기
+        const { data: others } = await _supabase.from('people')
+          .select('id, name, descriptor, ref_descriptors').neq('id', person.id);
+        const merged = [];
+        for (const o of others || []) {
+          if ((o.ref_descriptors || []).length) continue;  // 등록된 다른 인물은 건드리지 않음
+          const dist = Math.min(...person.ref_descriptors.map(r => distance(r, o.descriptor)));
+          if (dist < MATCH_THRESHOLD) {
+            await mergePerson(o, person.id, person.name, true);
+            merged.push(o.name);
+          }
+        }
+
+        result.textContent = `"${person.name}" 등록 완료 (얼굴 ${refs.length}장)` +
+          (fails.length ? ` / 얼굴 못 찾음: ${fails.join(', ')}` : '') +
+          (merged.length ? ` / 기존 기록 합침: ${merged.join(', ')}` : '');
+        $('reg-files').value = '';
+        $('reg-name').value = '';
+        $('reg-target').value = '';
+        render();
+      } catch (e) {
+        console.error(e);
+        result.textContent = '등록 오류: ' + e.message;
+      } finally {
+        $('reg-btn').disabled = false;
+      }
     }
 
     async function deletePerson(p) {
@@ -431,6 +599,17 @@
       else startApp();
     };
     $('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') $('login-btn').click(); });
+    $('reg-btn').onclick = registerPerson;
+
+    // 실시간 보기: ESP32 주소 기억해두기 (이 브라우저에만 저장)
+    try { $('live-addr').value = localStorage.getItem('watcher-live-addr') || 'watcher.local'; } catch (e) {}
+    $('live-btn').onclick = () => {
+      const addr = $('live-addr').value.trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      if (!addr) return;
+      try { localStorage.setItem('watcher-live-addr', addr); } catch (e) {}
+      // GitHub Pages(https) 안에 ESP32 영상(http)을 넣을 수 없어서 새 탭으로 엶
+      window.open(`http://${addr}/`, '_blank');
+    };
     $('logout-btn').onclick = async () => { await _supabase.auth.signOut(); showLogin(); };
 
     _supabase.auth.getSession().then(({ data }) => data.session ? startApp() : showLogin());
